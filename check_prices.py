@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -42,16 +43,27 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-AE,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Connection": "keep-alive",
 }
 
 
 # ---------------------------------------------------------------------------
 # Scrapers
 # ---------------------------------------------------------------------------
-def fetch(url):
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    return BeautifulSoup(resp.text, "html.parser")
+def fetch(url, retries=3, timeout=40):
+    """GET a URL with retries and a generous timeout. Raises on final failure."""
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=timeout)
+            resp.raise_for_status()
+            return BeautifulSoup(resp.text, "html.parser")
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(3 * attempt)  # back off: 3s, 6s
+    raise last_err
 
 
 def parse_price_text(text):
@@ -67,18 +79,44 @@ def parse_price_text(text):
         return None
 
 
+def find_price_near_aed(soup):
+    """
+    Fallback: scan visible page text for a number following 'AED' or 'د.إ',
+    ignoring script/style content. Picks the first plausible-looking price
+    (between 1 and 100,000) as a best-effort guess.
+    """
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(" ", strip=True)
+    candidates = re.findall(r"(?:AED|د\.إ)\s*([\d,]+\.?\d*)", text, re.I)
+    for c in candidates:
+        val = parse_price_text(c)
+        if val and 1 <= val <= 100000:
+            return val
+    return None
+
+
 def check_amazon_ae(url):
     """Returns (price, offer_text) for an amazon.ae product page."""
     soup = fetch(url)
 
     price = None
-    price_whole = soup.select_one(".a-price .a-price-whole")
-    if price_whole:
-        price = parse_price_text(price_whole.get_text())
+    for selector in [
+        ".a-price .a-price-whole",
+        "#priceblock_ourprice",
+        "#priceblock_dealprice",
+        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+        ".a-price .a-offscreen",
+        "#apex_desktop .a-price .a-offscreen",
+    ]:
+        el = soup.select_one(selector)
+        if el:
+            price = parse_price_text(el.get_text())
+            if price:
+                break
+
     if price is None:
-        alt = soup.select_one("#priceblock_ourprice, #priceblock_dealprice")
-        if alt:
-            price = parse_price_text(alt.get_text())
+        price = find_price_near_aed(soup)
 
     # Bank/card offer text often appears in a "Bank Offer" section
     offer_text = None
@@ -94,9 +132,21 @@ def check_noon(url):
     soup = fetch(url)
 
     price = None
-    price_el = soup.select_one('[data-qa="pdp-price"], .priceNow, .price')
-    if price_el:
-        price = parse_price_text(price_el.get_text())
+    for selector in [
+        '[data-qa="pdp-price"]',
+        ".priceNow",
+        ".price",
+        'span[class*="priceNow"]',
+        'div[class*="Price"] span',
+    ]:
+        el = soup.select_one(selector)
+        if el:
+            price = parse_price_text(el.get_text())
+            if price:
+                break
+
+    if price is None:
+        price = find_price_near_aed(soup)
 
     offer_text = None
     offer_block = soup.find(string=re.compile("cashback|instant discount|bank offer", re.I))
