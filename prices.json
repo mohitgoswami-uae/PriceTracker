@@ -1,3 +1,9 @@
 {
-  "koleston_6_4_flaming_copper": {}
+  "koleston_6_4_flaming_copper": {
+    "amazon_ae": {
+      "price": 28.0,
+      "offer": null,
+      "last_checked": "2026-09-03T08:05:36.286460+00:00"
+    }
+  }
 }
